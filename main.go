@@ -11,11 +11,11 @@ import (
 	"time"
 
 	libp2p "github.com/libp2p/go-libp2p"
-	crypto "github.com/libp2p/go-libp2p-core/crypto"
-	kaddht "github.com/libp2p/go-libp2p-kad-dht"
-	noise "github.com/libp2p/go-libp2p-noise"
-	quic "github.com/libp2p/go-libp2p-quic-transport"
+	kaddht "github.com/libp2p/go-libp2p-kad-dht/v2"
+	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	yamux "github.com/libp2p/go-libp2p/p2p/muxer/yamux"
+	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
+	quic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -59,10 +59,10 @@ func main() {
 	}
 
 	// Print addresses (append /p2p/<PeerID> so clients can hardcode it).
-	fmt.Println("Relay peer ID:", h.ID().Pretty())
+	fmt.Println("Relay peer ID:", h.ID().String())
 	fmt.Println("Listening addrs (replace 0.0.0.0 with your VM public IP for browser dialers):")
 	for _, a := range h.Addrs() {
-		fmt.Printf("  %s/p2p/%s\n", a, h.ID().Pretty())
+		fmt.Printf("  %s/p2p/%s\n", a, h.ID().String())
 	}
 
 	// Start a Kademlia DHT for peer routing/discovery
