@@ -1,97 +1,95 @@
+// main.go — minimal libp2p relay (uses built-in go-libp2p transports)
 package main
 
 import (
-    "context"
-    "fmt"
-    "log"
-    "os"
-    "time"
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-    libp2p "github.com/libp2p/go-libp2p"
-    noise "github.com/libp2p/go-libp2p-noise"
-    peerstore "github.com/libp2p/go-libp2p-core/peerstore"
-    crypto "github.com/libp2p/go-libp2p-core/crypto"
-    dht "github.com/libp2p/go-libp2p-kad-dht"
-    webrtc "github.com/libp2p/go-libp2p-webrtc-direct"
-    quic "github.com/libp2p/go-libp2p-quic-transport"
-    yamux "github.com/libp2p/go-libp2p/p2p/muxer/yamux"
-    ipnet "github.com/libp2p/go-libp2p-core/network"
-    ma "github.com/multiformats/go-multiaddr"
+	libp2p "github.com/libp2p/go-libp2p"
+	crypto "github.com/libp2p/go-libp2p-core/crypto"
+	kaddht "github.com/libp2p/go-libp2p-kad-dht"
+	noise "github.com/libp2p/go-libp2p-noise"
+	quic "github.com/libp2p/go-libp2p-quic-transport"
+	yamux "github.com/libp2p/go-libp2p/p2p/muxer/yamux"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 func main() {
-    ctx := context.Background()
+	ctx := context.Background()
 
-    // Generate a new peer identity (or load from file for a static ID)
-    priv, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
-    if err != nil {
-        log.Fatalf("Failed to generate key pair: %s", err)
-    }
+	// Load or generate identity (for production replace with persistent key load)
+	priv, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
+	if err != nil {
+		log.Fatalf("failed to generate key: %v", err)
+	}
 
-    // Configure listening addresses (0.0.0.0 means all interfaces; replace <VM_IP> below as needed)
-    listenAddrs := []ma.Multiaddr{}
-    // Listen for QUIC on port 4002 (IPv4 and IPv6)
-    addr4, _ := ma.NewMultiaddr("/ip4/0.0.0.0/udp/4002/quic-v1")
-    addr6, _ := ma.NewMultiaddr("/ip6/::/udp/4002/quic-v1")
-    listenAddrs = append(listenAddrs, addr4, addr6)
-    // Listen for WebRTC-direct on port 4002 (IPv4 and IPv6)
-    addr4w, _ := ma.NewMultiaddr("/ip4/0.0.0.0/udp/4002/webrtc-direct")
-    addr6w, _ := ma.NewMultiaddr("/ip6/::/udp/4002/webrtc-direct")
-    listenAddrs = append(listenAddrs, addr4w, addr6w)
+	// Listening addresses (0.0.0.0 binds all interfaces). Use VM public IP when advertising to browsers.
+	listenAddrs := []ma.Multiaddr{}
+	if a, err := ma.NewMultiaddr("/ip4/0.0.0.0/udp/4002/quic-v1"); err == nil {
+		listenAddrs = append(listenAddrs, a)
+	}
+	// Also include a UDP port for WebTransport / WebRTC UDPMux if available from go-libp2p defaults:
+	if a, err := ma.NewMultiaddr("/ip4/0.0.0.0/udp/4002"); err == nil {
+		listenAddrs = append(listenAddrs, a)
+	}
 
-    // WebRTC transport requires a multiplexer (we use Yamux) and optional STUN servers
-    // Here we include a public STUN server to aid NAT traversal (optional if node is on a public IP).
-    // The webrtc.Configuration uses pion/webrtc types.
-    iceServers := webrtc.ICEServer{URLs: []string{"stun:stun.l.google.com:19302"}}
-    rtcConfig := webrtc.Configuration{ICEServers: []webrtc.ICEServer{iceServers}}
-    rtcTransport, err := webrtc.NewTransport(rtcConfig, yamux.DefaultTransport)
-    if err != nil {
-        log.Fatalf("Failed to create WebRTC transport: %s", err)
-    }
+	// Build host with minimal options. We rely on go-libp2p's default transports which
+	// (in recent versions) include the built-in WebRTC implementation.
+	h, err := libp2p.New(
+		ctx,
+		libp2p.Identity(priv),
+		libp2p.ListenAddrs(listenAddrs...),
+		// Explicitly include QUIC transport for native peers
+		libp2p.Transport(quic.NewTransport),
+		// Security + muxer
+		libp2p.Security(noise.ID, noise.New),
+		libp2p.Muxer("/yamux/1.0.0", yamux.DefaultTransport),
+		// Make this host act as a v2 relay server if reachable
+		libp2p.EnableRelayService(),
+		// Force public reachability so it advertises itself as a relay (useful on a public VM)
+		libp2p.ForceReachabilityPublic(),
+	)
+	if err != nil {
+		log.Fatalf("failed to create host: %v", err)
+	}
 
-    // QUIC transport (v1)
-    quicTransport := quic.NewTransport
+	// Print addresses (append /p2p/<PeerID> so clients can hardcode it).
+	fmt.Println("Relay peer ID:", h.ID().Pretty())
+	fmt.Println("Listening addrs (replace 0.0.0.0 with your VM public IP for browser dialers):")
+	for _, a := range h.Addrs() {
+		fmt.Printf("  %s/p2p/%s\n", a, h.ID().Pretty())
+	}
 
-    // Construct the libp2p host with required options
-    host, err := libp2p.New(
-        ctx,
-        libp2p.Identity(priv),
-        // Listen on specified multiaddrs
-        libp2p.ListenAddrs(listenAddrs...),
-        // Use the chosen transports
-        libp2p.Transport(quicTransport),
-        libp2p.Transport(rtcTransport),
-        // Use Noise for encryption (default) and Yamux as muxer
-        libp2p.Security(noise.ID, noise.New),
-        libp2p.Muxer("/yamux/1.0.0", yamux.DefaultTransport),
-        // Enable circuit Relay V2 service
-        libp2p.EnableRelayService(),
-        // Force this node to assume it is publicly reachable
-        libp2p.ForceReachabilityPublic(),
-    )
-    if err != nil {
-        log.Fatalf("Failed to create libp2p host: %s", err)
-    }
+	// Start a Kademlia DHT for peer routing/discovery
+	dht, err := kaddht.New(ctx, h)
+	if err != nil {
+		log.Printf("warning: failed to create DHT: %v", err)
+	} else {
+		// Bootstrap (best-effort)
+		go func() {
+			if err := dht.Bootstrap(ctx); err != nil {
+				log.Printf("DHT bootstrap warning: %v", err)
+			}
+		}()
+	}
 
-    // Print the relay's listen addresses (including its peer ID) for bootstrapping
-    fmt.Println("Relay is listening on:")
-    for _, addr := range host.Addrs() {
-        // Append /p2p/<PeerID> so others know this relay's ID
-        fullAddr := addr.Encapsulate(ma.StringCast("/p2p/" + host.ID().Pretty()))
-        fmt.Printf("  %s\n", fullAddr)
-    }
+	// Wait for interrupt and shutdown cleanly
+	log.Println("Relay running — press Ctrl+C to stop")
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
 
-    // Initialize a Kademlia DHT for peer discovery
-    kademliaDHT, err := dht.New(ctx, host)
-    if err != nil {
-        log.Fatalf("Failed to create DHT: %s", err)
-    }
-    // Bootstrap the DHT so the node starts finding peers (empty seed list if first node)
-    if err := kademliaDHT.Bootstrap(ctx); err != nil {
-        log.Printf("Warning: DHT bootstrap error: %s", err)
-    }
-
-    // Keep the process running indefinitely
-    log.Println("Relay node is up. Waiting for connections...")
-    select {}
+	log.Println("Shutting down...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.Close(); err != nil {
+		log.Printf("error closing host: %v", err)
+	}
+	_ = shutdownCtx
+	log.Println("Stopped")
 }
