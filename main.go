@@ -89,10 +89,10 @@ type netNotifee struct{ reg *registry }
 func (n *netNotifee) Listen(network.Network, ma.Multiaddr)      {}
 func (n *netNotifee) ListenClose(network.Network, ma.Multiaddr) {}
 func (n *netNotifee) Connected(net network.Network, c network.Conn) {
-	peer := c.RemotePeer().Pretty()
+	peerID := c.RemotePeer().String()          // <-- use String()
 	addr := c.RemoteMultiaddr().String()
-	n.reg.upsert(peer, []string{addr})
-	log.Printf("auto-registered peer %s via %s", peer, addr)
+	n.reg.upsert(peerID, []string{addr})
+	log.Printf("auto-registered peer %s via %s", peerID, addr)
 }
 func (n *netNotifee) Disconnected(network.Network, network.Conn) {}
 func (n *netNotifee) OpenedStream(network.Network, network.Stream) {}
@@ -140,9 +140,8 @@ func main() {
 		listen = append(listen, a)
 	}
 
-	// Build host — rely on the libp2p defaults for transports; include Noise security
+	// Build host — modern libp2p.New takes only options (no ctx arg)
 	host, err := libp2p.New(
-		ctx,
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(listen...),
 		libp2p.Security(noise.ID, noise.New),
@@ -154,10 +153,10 @@ func main() {
 		log.Fatalf("failed to create libp2p host: %v", err)
 	}
 
-	fmt.Println("Relay peer ID:", host.ID().Pretty())
+	fmt.Println("Relay peer ID:", host.ID().String()) // <-- use String()
 	fmt.Println("Listening addresses (replace 0.0.0.0 with your VM public IP for browsers):")
 	for _, a := range host.Addrs() {
-		fmt.Printf("  %s/p2p/%s\n", a, host.ID().Pretty())
+		fmt.Printf("  %s/p2p/%s\n", a, host.ID().String()) // <-- use String()
 	}
 
 	// Auto-register incoming peers
@@ -210,4 +209,5 @@ func main() {
 	log.Println("shutting down")
 	_ = srv.Close()
 	_ = host.Close()
+	_ = ctx
 }
