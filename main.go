@@ -1,5 +1,4 @@
-// main.go — minimal relayed host + HTTP discovery (no DHT)
-// Uses modern libp2p import paths (core/* and p2p/security/noise)
+// main.go — Minimal libp2p relay + HTTP rendezvous with topic filter.
 package main
 
 import (
@@ -22,10 +21,11 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-// PeerEntry is returned by /peers
+// PeerEntry is what we store/return via HTTP.
 type PeerEntry struct {
 	ID       string   `json:"id"`
 	Addrs    []string `json:"addrs"`
+	Topics   []string `json:"topics"`
 	LastSeen int64    `json:"lastSeen"`
 }
 
@@ -34,40 +34,55 @@ type registry struct {
 	peers map[string]*PeerEntry
 }
 
-func newRegistry() *registry {
-	return &registry{peers: make(map[string]*PeerEntry)}
-}
+func newRegistry() *registry { return &registry{peers: make(map[string]*PeerEntry)} }
 
-func (r *registry) upsert(id string, addrs []string) {
+// merge addresses + topics and update timestamp
+func (r *registry) upsert(id string, addrs, topics []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now().Unix()
 	if e, ok := r.peers[id]; ok {
-		// merge addresses
-		m := make(map[string]struct{}, len(e.Addrs)+len(addrs))
+		addrSet := map[string]struct{}{}
 		for _, a := range e.Addrs {
-			m[a] = struct{}{}
+			addrSet[a] = struct{}{}
 		}
 		for _, a := range addrs {
-			m[a] = struct{}{}
+			addrSet[a] = struct{}{}
 		}
-		merged := make([]string, 0, len(m))
-		for a := range m {
-			merged = append(merged, a)
+		addrsMerged := make([]string, 0, len(addrSet))
+		for a := range addrSet {
+			addrsMerged = append(addrsMerged, a)
 		}
-		e.Addrs = merged
+
+		topSet := map[string]struct{}{}
+		for _, t := range e.Topics {
+			topSet[t] = struct{}{}
+		}
+		for _, t := range topics {
+			topSet[t] = struct{}{}
+		}
+		topicsMerged := make([]string, 0, len(topSet))
+		for t := range topSet {
+			topicsMerged = append(topicsMerged, t)
+		}
+
+		e.Addrs = addrsMerged
+		e.Topics = topicsMerged
 		e.LastSeen = now
 	} else {
-		r.peers[id] = &PeerEntry{ID: id, Addrs: addrs, LastSeen: now}
+		r.peers[id] = &PeerEntry{ID: id, Addrs: addrs, Topics: topics, LastSeen: now}
 	}
 }
 
-func (r *registry) list() []*PeerEntry {
+func (r *registry) list(topic string) []*PeerEntry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]*PeerEntry, 0, len(r.peers))
+	var out []*PeerEntry
 	for _, e := range r.peers {
-		out = append(out, &PeerEntry{ID: e.ID, Addrs: append([]string(nil), e.Addrs...), LastSeen: e.LastSeen})
+		if topic == "" || contains(e.Topics, topic) {
+			cp := *e
+			out = append(out, &cp)
+		}
 	}
 	return out
 }
@@ -83,56 +98,59 @@ func (r *registry) pruneOlderThan(sec int64) {
 	}
 }
 
-// netNotifee auto-registers peers when they connect
+func contains(ss []string, x string) bool {
+	for _, s := range ss {
+		if s == x {
+			return true
+		}
+	}
+	return false
+}
+
+// netNotifee registers peers automatically when they connect.
 type netNotifee struct{ reg *registry }
 
-func (n *netNotifee) Listen(network.Network, ma.Multiaddr)      {}
-func (n *netNotifee) ListenClose(network.Network, ma.Multiaddr) {}
-func (n *netNotifee) Connected(net network.Network, c network.Conn) {
-	peerID := c.RemotePeer().String()          // <-- use String()
-	addr := c.RemoteMultiaddr().String()
-	n.reg.upsert(peerID, []string{addr})
-	log.Printf("auto-registered peer %s via %s", peerID, addr)
-}
-func (n *netNotifee) Disconnected(network.Network, network.Conn) {}
-func (n *netNotifee) OpenedStream(network.Network, network.Stream) {}
+func (n *netNotifee) Listen(network.Network, ma.Multiaddr)          {}
+func (n *netNotifee) ListenClose(network.Network, ma.Multiaddr)     {}
+func (n *netNotifee) Disconnected(network.Network, network.Conn)    {}
+func (n *netNotifee) OpenedStream(network.Network, network.Stream)  {}
 func (n *netNotifee) ClosedStream(network.Network, network.Stream)  {}
+func (n *netNotifee) Connected(net network.Network, c network.Conn) {
+	id := c.RemotePeer().String()
+	addr := c.RemoteMultiaddr().String()
+	n.reg.upsert(id, []string{addr}, nil)
+	log.Printf("peer connected: %s via %s", id, addr)
+}
 
 func main() {
 	ctx := context.Background()
 	reg := newRegistry()
 
-	// persistent identity (store locally so peer ID stays constant)
+	// Load or generate persistent identity
 	keyFile := "peer.key"
 	var priv crypto.PrivKey
-	if _, err := os.Stat(keyFile); err == nil {
-		b, err := os.ReadFile(keyFile)
-		if err != nil {
-			log.Fatalf("read key: %v", err)
-		}
-		priv, err = crypto.UnmarshalPrivateKey(b)
+	if b, err := os.ReadFile(keyFile); err == nil {
+		k, err := crypto.UnmarshalPrivateKey(b)
 		if err != nil {
 			log.Fatalf("unmarshal key: %v", err)
 		}
+		priv = k
 		log.Println("loaded identity key from", keyFile)
 	} else {
 		k, _, err := crypto.GenerateKeyPair(crypto.Ed25519, -1)
 		if err != nil {
 			log.Fatalf("generate key: %v", err)
 		}
-		b, err := crypto.MarshalPrivateKey(k)
-		if err != nil {
-			log.Fatalf("marshal key: %v", err)
-		}
+		b, _ := crypto.MarshalPrivateKey(k)
 		if err := os.WriteFile(keyFile, b, 0600); err != nil {
 			log.Fatalf("save key: %v", err)
 		}
 		priv = k
-		log.Println("generated identity key and saved to", keyFile)
+		log.Println("generated new identity key")
 	}
 
-	// Listen addresses:
-	listen := []ma.Multiaddr{}
+	// Listen on QUIC + WebSockets
+	var listen []ma.Multiaddr
 	if a, err := ma.NewMultiaddr("/ip4/0.0.0.0/udp/4002/quic-v1"); err == nil {
 		listen = append(listen, a)
 	}
@@ -140,7 +158,7 @@ func main() {
 		listen = append(listen, a)
 	}
 
-	// Build host — modern libp2p.New takes only options (no ctx arg)
+	// Create libp2p host
 	host, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(listen...),
@@ -150,22 +168,22 @@ func main() {
 		libp2p.ForceReachabilityPublic(),
 	)
 	if err != nil {
-		log.Fatalf("failed to create libp2p host: %v", err)
+		log.Fatalf("create host: %v", err)
 	}
 
-	fmt.Println("Relay peer ID:", host.ID().String()) // <-- use String()
-	fmt.Println("Listening addresses (replace 0.0.0.0 with your VM public IP for browsers):")
+	fmt.Println("Relay peer ID:", host.ID().String())
+	fmt.Println("Listening addresses (replace 0.0.0.0 with your VM IP for browsers):")
 	for _, a := range host.Addrs() {
-		fmt.Printf("  %s/p2p/%s\n", a, host.ID().String()) // <-- use String()
+		fmt.Printf("  %s/p2p/%s\n", a, host.ID().String())
 	}
 
-	// Auto-register incoming peers
+	// Auto-register new connections
 	host.Network().Notify(&netNotifee{reg: reg})
 
-	// HTTP discovery server
+	// --- HTTP discovery endpoints ---
 	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "use POST", http.StatusMethodNotAllowed)
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
 		var p PeerEntry
@@ -177,23 +195,28 @@ func main() {
 			http.Error(w, "missing id", http.StatusBadRequest)
 			return
 		}
-		reg.upsert(p.ID, p.Addrs)
+		reg.upsert(p.ID, p.Addrs, p.Topics)
 		w.WriteHeader(http.StatusNoContent)
 	})
+
 	http.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(reg.list())
+		topic := r.URL.Query().Get("topic")
+		_ = json.NewEncoder(w).Encode(reg.list(topic))
 	})
-	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+
+	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("ok"))
+	})
 
 	srv := &http.Server{Addr: ":8080"}
 	go func() {
-		log.Printf("HTTP discovery listening on %s", srv.Addr)
+		log.Println("HTTP rendezvous listening on", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("http server error: %v", err)
+			log.Fatalf("http server: %v", err)
 		}
 	}()
 
-	// prune stale entries
+	// Periodically prune stale entries (>5 min)
 	go func() {
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
@@ -202,11 +225,11 @@ func main() {
 		}
 	}()
 
-	// wait for ctrl-c
+	// Graceful shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
-	log.Println("shutting down")
+	log.Println("shutting down...")
 	_ = srv.Close()
 	_ = host.Close()
 	_ = ctx
