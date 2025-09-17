@@ -14,10 +14,10 @@ import (
 	"time"
 
 	libp2p "github.com/libp2p/go-libp2p"
-	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
-	yamux "github.com/libp2p/go-libp2p/p2p/muxer/yamux"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	network "github.com/libp2p/go-libp2p/core/network"
+	yamux "github.com/libp2p/go-libp2p/p2p/muxer/yamux"
+	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -110,11 +110,11 @@ func contains(ss []string, x string) bool {
 // netNotifee registers peers automatically when they connect.
 type netNotifee struct{ reg *registry }
 
-func (n *netNotifee) Listen(network.Network, ma.Multiaddr)          {}
-func (n *netNotifee) ListenClose(network.Network, ma.Multiaddr)     {}
-func (n *netNotifee) Disconnected(network.Network, network.Conn)    {}
-func (n *netNotifee) OpenedStream(network.Network, network.Stream)  {}
-func (n *netNotifee) ClosedStream(network.Network, network.Stream)  {}
+func (n *netNotifee) Listen(network.Network, ma.Multiaddr)         {}
+func (n *netNotifee) ListenClose(network.Network, ma.Multiaddr)    {}
+func (n *netNotifee) Disconnected(network.Network, network.Conn)   {}
+func (n *netNotifee) OpenedStream(network.Network, network.Stream) {}
+func (n *netNotifee) ClosedStream(network.Network, network.Stream) {}
 func (n *netNotifee) Connected(net network.Network, c network.Conn) {
 	id := c.RemotePeer().String()
 	addr := c.RemoteMultiaddr().String()
@@ -182,6 +182,14 @@ func main() {
 
 	// --- HTTP discovery endpoints ---
 	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
@@ -200,11 +208,27 @@ func main() {
 	})
 
 	http.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
 		topic := r.URL.Query().Get("topic")
 		_ = json.NewEncoder(w).Encode(reg.list(topic))
 	})
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
 		w.Write([]byte("ok"))
 	})
 
